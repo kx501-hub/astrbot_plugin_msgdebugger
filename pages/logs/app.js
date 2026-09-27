@@ -5,7 +5,7 @@ import {conversationGroup, buildJourney, overviewView, inputView} from './conver
 const bridge = window.AstrBotPluginPage;
 const tabs = [['overview','过程总览'],['input','模型输入'],['plugins','插件改动'],['tools','工具'],['skills','Skills'],['compare','请求对比'],['usage','Token 与耗时'],['settings','复读与采集']];
 const labels = {inbound:'收到消息',request_snapshot:'准备模型请求',model_request:'请求模型',model_response:'模型返回',model_error:'模型请求异常',model_interrupted:'模型请求中断',plugin_change:'插件执行',tool_start:'调用工具',tool_end:'工具返回',llm_response:'Agent 输出',decorating:'发送前处理',sent:'发送完成',echo_start:'复读开始',echo_sent:'主动复读返回',echo_error:'复读失败',extension:'插件补充报告'};
-const state = {traces:[], trace:null, tab:'overview', attempt:0, runtime:{}, inventory:null, left:null, leftAttempt:0, scope:'base', changesOnly:true, groupOpen:new Map(), groupPages:new Map(), messageIndex:null, messagePage:0, inputFilter:'all', inputQuery:'', guideOpen:false};
+const state = {traces:[], trace:null, tab:'overview', attempt:0, runtime:{}, inventory:null, left:null, leftAttempt:0, scope:'base', changesOnly:true, groupOpen:new Map(), groupPages:new Map(), messageIndex:null, messagePage:0, inputFilter:'all', inputQuery:'', guideOpen:false, toolCatalogScope:'request', toolQuery:'', toolPage:0, skillCatalogScope:'request', skillQuery:'', skillPage:0};
 let busy = false;
 let selectionVersion = 0;
 const content = document.querySelector('#content');
@@ -33,7 +33,7 @@ async function choose(id) {
   const result = await api('detail', {id});
   if (version !== selectionVersion) return;
   if(state.trace?.id !== id) {
-    state.tab='overview';state.attempt=0;state.messageIndex=null;state.messagePage=0;state.inputFilter='all';state.inputQuery='';
+    state.tab='overview';state.attempt=0;state.messageIndex=null;state.messagePage=0;state.inputFilter='all';state.inputQuery='';state.toolCatalogScope='request';state.toolQuery='';state.toolPage=0;state.skillCatalogScope='request';state.skillQuery='';state.skillPage=0;
   }
   state.trace = result.trace;
   state.attempt=Math.min(state.attempt,Math.max(0,requests(state.trace).length-1));
@@ -205,7 +205,6 @@ function tools() {
   const called=(state.trace?.stages||[]).filter(s=>s.key==='tool_start').map(dataOf);
   const names=new Set(called.map(c=>c.tool?.name));
   const hasRequest=!!current();
-  const list=hasRequest?offered:(state.inventory?.tools||[]);
   const executions=[];
   const pending=new Map();
   for(const stage of (state.trace?.stages||[]).filter(s=>s.key==='tool_start'||s.key==='tool_end')) {
@@ -236,17 +235,34 @@ function tools() {
     if(execution.end&&execution.end.result!==undefined)raw('工具返回',execution.end.result,box);
     raw('采集证据',{start:execution.start,end:execution.end},box);
   }
-  content.append(el('h2',hasRequest?`选中请求的工具快照 · ${offered.length} 个`:'当前注册工具'));
-  if(!list.length) hint(hasRequest?'这次请求没有提供工具。已注册工具仍可在下方实时目录中查看。':state.inventory?'没有可显示的工具。':'正在加载工具目录…',content);
-  for(const tool of list) {
+  content.append(el('h2','工具目录'));
+  const catalogControls=el('div',null,'toolbar');content.append(catalogControls);
+  if(hasRequest) select('查看',[['request',`本次请求 · ${offered.length}`],['live',`实时注册 · ${(state.inventory?.tools||[]).length}`]],state.toolCatalogScope,v=>{state.toolCatalogScope=v;state.toolPage=0;render();},catalogControls);
+  else state.toolCatalogScope='live';
+  const toolSearch=el('input');toolSearch.type='search';toolSearch.placeholder='搜索工具名、说明或来源';toolSearch.value=state.toolQuery;
+  toolSearch.oninput=()=>{state.toolQuery=toolSearch.value;};
+  toolSearch.onkeydown=event=>{if(event.key==='Enter'){state.toolPage=0;render();}};catalogControls.append(toolSearch);
+  button('搜索',()=>{state.toolPage=0;render();},catalogControls);
+  const source=state.toolCatalogScope==='request'&&hasRequest?offered:(state.inventory?.tools||[]);
+  const query=state.toolQuery.trim().toLowerCase();
+  const filtered=source.filter(tool=>`${tool.name||''} ${tool.description||''} ${tool.source||''}`.toLowerCase().includes(query));
+  const pages=Math.max(1,Math.ceil(filtered.length/20));state.toolPage=Math.min(state.toolPage,pages-1);
+  content.append(el('p',`${state.toolCatalogScope==='request'&&hasRequest?'本次请求提供':'当前实时注册'} ${source.length} 个 · 当前显示 ${filtered.length} 个匹配项`,'muted'));
+  if(!filtered.length) hint(source.length?'没有符合搜索条件的工具。':state.toolCatalogScope==='request'?'这次请求没有提供工具。可切换到“实时注册”查看全部目录。':state.inventory?'没有可显示的工具。':'正在加载工具目录…',content);
+  for(const tool of filtered.slice(state.toolPage*20,state.toolPage*20+20)) {
     const box=card(tool.name,content);
-    box.append(el('span',hasRequest?'本次提供':'当前注册','badge'));
+    box.append(el('span',state.toolCatalogScope==='request'&&hasRequest?'本次提供':'当前注册','badge'));
     if(names.has(tool.name)) box.append(el('span','本次对话已调用','badge'));
     if(tool.active===false) box.append(el('span','未启用','badge'));
     box.append(el('p',tool.description),el('small',`来源：${tool.source}`,'muted'));
     raw('参数定义',tool.parameters,box);
   }
-  raw('当前全部注册工具（实时目录）',state.inventory?.tools || [],content);
+  if(filtered.length>20) {
+    const pager=el('div',null,'toolbar');content.append(pager);
+    button('上一页',()=>{state.toolPage--;render();},pager).disabled=state.toolPage===0;
+    pager.append(el('small',`${state.toolPage+1} / ${pages}`));
+    button('下一页',()=>{state.toolPage++;render();},pager).disabled=state.toolPage+1>=pages;
+  }
   for(const error of state.inventory?.errors||[]) hint(error,content);
 }
 
@@ -255,25 +271,40 @@ function skills() {
   const req=current();
   const offered=requestSkills(req?.messages || []);
   const list=state.inventory?.skills || [];
-  const header=card(req?`本次请求携带的技能目录 · ${offered.length} 项`:'先选择一次模型请求',content);
-  hint('“本次携带”从选中请求的 system / developer 技能目录提取，反映人格和配置筛选后的输入。目录进入请求不等于模型读取了 SKILL.md 全文，也不等于执行了技能。',header);
-  if(req && !offered.length) hint('这份快照中没有识别到 AstrBot 标准技能目录。全部停用时这是正常的；自定义格式或被截断的目录暂时无法识别。',header);
-  for(const skill of offered) {
-    const box=card(skill.name,header);
-    box.append(el('span',`本次携带 · 消息 #${skill.messageIndex+1}`,'badge'));
-    box.append(el('p',skill.description),el('small',skill.path,'muted'));
-  }
   const enabled=list.filter(s=>s.active===true).length;
-  const catalog=card(`当前本地文件目录 · ${list.length} 项 / 技能开关开启 ${enabled} 项`,content);
-  hint('技能开关和所属插件状态分别显示：插件停用或未注册时，即使技能开关开启，AstrBot 也会过滤该插件技能。人格、配置和运行环境还会继续筛选；沙箱及工作区文件可能不在本地目录中。停用技能仍保留在这里供检查。',catalog);
-  button('刷新当前目录',async()=>{state.inventory=await api('inventory');render();},catalog);
-  if(!list.length) hint(state.inventory?'当前没有可读取的 Skills。':'正在加载 Skills…',catalog);
-  for(const skill of list) {
-    const box=card(skill.name,catalog);
-    box.append(el('span',skill.active===true?'技能开关：开':skill.active===false?'技能开关：关':'技能开关：未知','badge'));
-    if(skill.plugin_name) box.append(el('span',skill.plugin_registered===false?'所属插件未注册':skill.plugin_active===false?'所属插件已停用':skill.plugin_active===true?'所属插件已启用':'所属插件状态未知，请刷新','badge'));
-    box.append(el('p',skill.description),el('small',`来源：${skill.plugin_name||skill.source_label||skill.source_type} · ${skill.path}`,'muted'));
-    raw('SKILL.md 当前内容',skill.content ?? skill.content_error ?? '没有本地文件',box);
+  content.append(el('h2','Skills 目录'));
+  hint('“本次携带”来自选中请求的 system / developer 输入，最接近模型实际看到的目录；“本地文件”用于检查安装、开关和插件状态。携带目录不代表模型读取了 SKILL.md 全文或执行了技能。',content);
+  const controls=el('div',null,'toolbar');content.append(controls);
+  if(req) select('查看',[['request',`本次携带 · ${offered.length}`],['local',`本地文件 · ${list.length}`]],state.skillCatalogScope,v=>{state.skillCatalogScope=v;state.skillPage=0;render();},controls);
+  else state.skillCatalogScope='local';
+  const skillSearch=el('input');skillSearch.type='search';skillSearch.placeholder='搜索 Skill 名、说明或来源';skillSearch.value=state.skillQuery;
+  skillSearch.oninput=()=>{state.skillQuery=skillSearch.value;};
+  skillSearch.onkeydown=event=>{if(event.key==='Enter'){state.skillPage=0;render();}};controls.append(skillSearch);
+  button('搜索',()=>{state.skillPage=0;render();},controls);
+  if(state.skillCatalogScope==='local') button('刷新当前目录',async()=>{state.inventory=await api('inventory');render();},controls);
+  const source=state.skillCatalogScope==='request'&&req?offered:list;
+  const query=state.skillQuery.trim().toLowerCase();
+  const filtered=source.filter(skill=>`${skill.name||''} ${skill.description||''} ${skill.path||''} ${skill.plugin_name||''} ${skill.source_label||''} ${skill.source_type||''}`.toLowerCase().includes(query));
+  const pages=Math.max(1,Math.ceil(filtered.length/20));state.skillPage=Math.min(state.skillPage,pages-1);
+  content.append(el('p',state.skillCatalogScope==='request'&&req?`本次携带 ${offered.length} 项 · 当前显示 ${filtered.length} 项`:`本地文件 ${list.length} 项 · 技能开关开启 ${enabled} 项 · 当前显示 ${filtered.length} 项`,'muted'));
+  if(!filtered.length) hint(source.length?'没有符合搜索条件的 Skill。':state.skillCatalogScope==='request'?'这份请求中没有识别到 Skills。全部停用时这是正常的。':state.inventory?'当前没有可读取的 Skills。':'正在加载 Skills…',content);
+  for(const skill of filtered.slice(state.skillPage*20,state.skillPage*20+20)) {
+    const box=card(skill.name,content);
+    if(state.skillCatalogScope==='request'&&req) {
+      box.append(el('span',`本次携带 · 消息 #${skill.messageIndex+1}`,'badge'));
+      box.append(el('p',skill.description),el('small',skill.path,'muted'));
+    } else {
+      box.append(el('span',skill.active===true?'技能开关：开':skill.active===false?'技能开关：关':'技能开关：未知','badge'));
+      if(skill.plugin_name) box.append(el('span',skill.plugin_registered===false?'所属插件未注册':skill.plugin_active===false?'所属插件已停用':skill.plugin_active===true?'所属插件已启用':'所属插件状态未知，请刷新','badge'));
+      box.append(el('p',skill.description),el('small',`来源：${skill.plugin_name||skill.source_label||skill.source_type} · ${skill.path}`,'muted'));
+      raw('SKILL.md 当前内容',skill.content ?? skill.content_error ?? '没有本地文件',box);
+    }
+  }
+  if(filtered.length>20) {
+    const pager=el('div',null,'toolbar');content.append(pager);
+    button('上一页',()=>{state.skillPage--;render();},pager).disabled=state.skillPage===0;
+    pager.append(el('small',`${state.skillPage+1} / ${pages}`));
+    button('下一页',()=>{state.skillPage++;render();},pager).disabled=state.skillPage+1>=pages;
   }
   for(const error of state.inventory?.errors||[]) hint(error,content);
 }
