@@ -8,6 +8,8 @@ const labels = {inbound:'收到消息',request_snapshot:'准备模型请求',mod
 const state = {traces:[], trace:null, tab:'overview', attempt:0, runtime:{}, inventory:null, left:null, leftAttempt:0, scope:'base', changesOnly:true, groupOpen:new Map(), groupPages:new Map(), messageIndex:null, messagePage:0, inputFilter:'all', inputQuery:'', guideOpen:false, toolCatalogScope:'request', toolQuery:'', toolPage:0, skillCatalogScope:'request', skillQuery:'', skillPage:0};
 let busy = false;
 let selectionVersion = 0;
+let compareSelectionVersion = 0;
+const compareSearch = {query:'', group:'same', page:0};
 const content = document.querySelector('#content');
 const requests = trace => (trace?.stages || []).filter(s => s.key === 'model_request' && dataOf(s).attempt_id).map(dataOf);
 const current = () => requests(state.trace)[state.attempt];
@@ -30,9 +32,11 @@ async function api(path, body) {
 
 async function choose(id) {
   const version = ++selectionVersion;
+  ++compareSelectionVersion;
   const result = await api('detail', {id});
   if (version !== selectionVersion) return;
   if(state.trace?.id !== id) {
+    compareSearch.query='';compareSearch.group='same';compareSearch.page=0;
     state.tab='overview';state.attempt=0;state.messageIndex=null;state.messagePage=0;state.inputFilter='all';state.inputQuery='';state.toolCatalogScope='request';state.toolQuery='';state.toolPage=0;state.skillCatalogScope='request';state.skillQuery='';state.skillPage=0;
   }
   state.trace = result.trace;
@@ -92,6 +96,8 @@ function renderList() {
 async function openView(key,attempt) {
   if(Number.isInteger(attempt)) {
     state.attempt=attempt;state.messageIndex=null;state.messagePage=0;state.inputFilter='all';state.inputQuery='';
+    state.toolCatalogScope='request';state.toolPage=0;state.toolQuery='';
+    state.skillCatalogScope='request';state.skillPage=0;state.skillQuery='';
   }
   await changeTab(key);
 }
@@ -104,19 +110,25 @@ async function changeTab(key) {
     if (state.tab === key) render();
   }
   if (key === 'compare' && !state.left && state.trace) {
+    const version=++compareSelectionVersion;
     const idx = state.traces.findIndex(t => t.id === state.trace.id);
     const previous = state.traces.slice(idx + 1).find(t => t.umo === state.trace.umo);
-    if (previous) state.left = (await api('detail', {id:previous.id})).trace;
-    else state.left = state.trace;
+    const left=previous?(await api('detail', {id:previous.id})).trace:state.trace;
+    if(version!==compareSelectionVersion)return;
+    state.left=left;
     state.leftAttempt = Math.max(0, requests(state.left).length - 1);
     if (state.tab === key) render();
   }
 }
 
-function requestPicker(parent) {
+function requestPicker(parent,inline=false) {
   const list = requests(state.trace);
-  if (!list.length) { hint('没有逐轮模型请求记录。旧记录、第三方 Agent 或未启用的采集适配器可能没有此数据。',parent); return; }
-  const row = el('div',null,'toolbar'); parent.append(row);
+  if (!list.length) {
+    if(!inline)hint('没有逐轮模型请求记录。旧记录、第三方 Agent 或未启用的采集适配器可能没有此数据。',parent);
+    return;
+  }
+  const row = inline?parent:el('div',null,'toolbar');
+  if(!inline)parent.append(row);
   select('模型请求',list.map((r,i) => [String(i),`第 ${i+1} 次 · ${r.provider || '未知提供商'} · ${r.model || '默认模型'}`]),String(state.attempt),v => openView(state.tab,Number(v)),row);
 }
 
@@ -199,8 +211,6 @@ function plugins() {
 }
 
 function tools() {
-  requestPicker(content);
-  hint('当前注册目录与历史请求快照分别展示。已注册 ≠ 本次提供 ≠ 实际调用。未匹配到注册插件时仅显示模块来源，不猜测所属插件。',content);
   const offered=current()?.tools || [];
   const called=(state.trace?.stages||[]).filter(s=>s.key==='tool_start').map(dataOf);
   const names=new Set(called.map(c=>c.tool?.name));
@@ -222,8 +232,8 @@ function tools() {
     }
   }
   content.append(el('h2',`工具执行记录 · ${executions.length} 次`));
-  hint('一次调用合并显示开始与返回。同一主/子代理范围内的同名工具按观测顺序配对；“等待返回”也可能表示记录被截断或执行路径没有结束事件。',content);
-  if(!executions.length) hint('这条记录没有观测到实际工具执行。模型请求工具不等于工具已经运行。',content);
+  if(executions.length) hint('一次调用合并显示开始与返回。同一主/子代理范围内的同名工具按观测顺序配对；“等待返回”也可能表示记录被截断或执行路径没有结束事件。',content);
+  else content.append(el('div',state.trace?'这条记录没有观测到实际工具执行。':'选择一条记录后查看实际工具执行。','empty'));
   for(const execution of executions) {
     const box=card(`${execution.scope==='nested'?'子代理':'主代理'} · ${execution.name}`,content);
     box.className+=' tool-execution';
@@ -236,8 +246,13 @@ function tools() {
     raw('采集证据',{start:execution.start,end:execution.end},box);
   }
   content.append(el('h2','工具目录'));
+  content.append(el('p',hasRequest&&state.toolCatalogScope==='request'?'当前请求提供给模型的工具；实际执行见上方记录。':'当前实时注册的工具目录，历史请求的工具以请求快照为准。','muted'));
   const catalogControls=el('div',null,'toolbar');content.append(catalogControls);
-  if(hasRequest) select('查看',[['request',`本次请求 · ${offered.length}`],['live',`实时注册 · ${(state.inventory?.tools||[]).length}`]],state.toolCatalogScope,v=>{state.toolCatalogScope=v;state.toolPage=0;render();},catalogControls);
+  requestPicker(catalogControls,true);
+  if(hasRequest) select('查看',[['request',`本次请求 · ${offered.length}`],['live',`实时注册 · ${(state.inventory?.tools||[]).length}`]],state.toolCatalogScope,v=>{
+    state.toolQuery='';state.toolPage=0;
+    state.toolCatalogScope=v;render();
+  },catalogControls);
   else state.toolCatalogScope='live';
   const toolSearch=el('input');toolSearch.type='search';toolSearch.placeholder='搜索工具名、说明或来源';toolSearch.value=state.toolQuery;
   toolSearch.oninput=()=>{state.toolQuery=toolSearch.value;};
@@ -247,8 +262,8 @@ function tools() {
   const query=state.toolQuery.trim().toLowerCase();
   const filtered=source.filter(tool=>`${tool.name||''} ${tool.description||''} ${tool.source||''}`.toLowerCase().includes(query));
   const pages=Math.max(1,Math.ceil(filtered.length/20));state.toolPage=Math.min(state.toolPage,pages-1);
-  content.append(el('p',`${state.toolCatalogScope==='request'&&hasRequest?'本次请求提供':'当前实时注册'} ${source.length} 个 · 当前显示 ${filtered.length} 个匹配项`,'muted'));
-  if(!filtered.length) hint(source.length?'没有符合搜索条件的工具。':state.toolCatalogScope==='request'?'这次请求没有提供工具。可切换到“实时注册”查看全部目录。':state.inventory?'没有可显示的工具。':'正在加载工具目录…',content);
+  content.append(el('p',`${state.toolCatalogScope==='request'&&hasRequest?`请求 ${state.attempt+1} 提供给模型的工具`:'当前实时注册'} ${source.length} 个 · 当前显示 ${filtered.length} 个匹配项`,'muted'));
+  if(!filtered.length) content.append(el('div',source.length?'没有符合搜索条件的工具。':state.toolCatalogScope==='request'?'这次请求没有提供工具。可切换到“实时注册”查看全部目录。':state.inventory?'没有可显示的工具。':'正在加载工具目录…','empty'));
   for(const tool of filtered.slice(state.toolPage*20,state.toolPage*20+20)) {
     const box=card(tool.name,content);
     box.append(el('span',state.toolCatalogScope==='request'&&hasRequest?'本次提供':'当前注册','badge'));
@@ -267,14 +282,14 @@ function tools() {
 }
 
 function skills() {
-  requestPicker(content);
   const req=current();
   const offered=requestSkills(req?.messages || []);
   const list=state.inventory?.skills || [];
   const enabled=list.filter(s=>s.active===true).length;
   content.append(el('h2','Skills 目录'));
-  hint('“本次携带”来自选中请求的 system / developer 输入，最接近模型实际看到的目录；“本地文件”用于检查安装、开关和插件状态。携带目录不代表模型读取了 SKILL.md 全文或执行了技能。',content);
+  content.append(el('p',req&&state.skillCatalogScope==='request'?'选中请求的 system / developer 指令中携带的技能目录。携带目录不代表模型读取或执行了技能。':'当前本地技能文件、开关和所属插件状态。请求实际携带的技能以请求快照为准。','muted'));
   const controls=el('div',null,'toolbar');content.append(controls);
+  requestPicker(controls,true);
   if(req) select('查看',[['request',`本次携带 · ${offered.length}`],['local',`本地文件 · ${list.length}`]],state.skillCatalogScope,v=>{state.skillCatalogScope=v;state.skillPage=0;render();},controls);
   else state.skillCatalogScope='local';
   const skillSearch=el('input');skillSearch.type='search';skillSearch.placeholder='搜索 Skill 名、说明或来源';skillSearch.value=state.skillQuery;
@@ -287,7 +302,7 @@ function skills() {
   const filtered=source.filter(skill=>`${skill.name||''} ${skill.description||''} ${skill.path||''} ${skill.plugin_name||''} ${skill.source_label||''} ${skill.source_type||''}`.toLowerCase().includes(query));
   const pages=Math.max(1,Math.ceil(filtered.length/20));state.skillPage=Math.min(state.skillPage,pages-1);
   content.append(el('p',state.skillCatalogScope==='request'&&req?`本次携带 ${offered.length} 项 · 当前显示 ${filtered.length} 项`:`本地文件 ${list.length} 项 · 技能开关开启 ${enabled} 项 · 当前显示 ${filtered.length} 项`,'muted'));
-  if(!filtered.length) hint(source.length?'没有符合搜索条件的 Skill。':state.skillCatalogScope==='request'?'这份请求中没有识别到 Skills。全部停用时这是正常的。':state.inventory?'当前没有可读取的 Skills。':'正在加载 Skills…',content);
+  if(!filtered.length) content.append(el('div',source.length?'没有符合搜索条件的 Skill。':state.skillCatalogScope==='request'?'这份请求中没有识别到 Skills。全部停用时这是正常的。':state.inventory?'当前没有可读取的 Skills。':'正在加载 Skills…','empty'));
   for(const skill of filtered.slice(state.skillPage*20,state.skillPage*20+20)) {
     const box=card(skill.name,content);
     if(state.skillCatalogScope==='request'&&req) {
@@ -312,48 +327,126 @@ function skills() {
 function compare() {
   requestPicker(content);
   hint('默认比较同一会话的上一条记录，也可以手动选择。基础部分包含 system / developer、工具和额外内容；注入用户消息里的指令需要在“全部内容”中查看。',content);
+  const picker=el('details',null,'card');
+  picker.open=compareSearch.open!==false;
+  const pickerTitle=el('summary','查找比较对象');picker.append(pickerTitle);content.append(picker);
+  picker.ontoggle=()=>{compareSearch.open=picker.open;};
+  const filters=el('div',null,'toolbar');picker.append(filters);
+  const groups=new Map(state.traces.map(trace=>{const group=conversationGroup(trace);return [group.key,`${group.label} · ${group.platform}`];}));
+  select('会话',[['same','当前会话'],['all','全部会话'],...groups],compareSearch.group,value=>{compareSearch.group=value;compareSearch.page=0;render();},filters);
+  const search=el('input');search.type='search';search.placeholder='搜索消息摘要、发送者或时间';search.value=compareSearch.query;
+  search.setAttribute('aria-label','搜索比较记录');filters.append(search);
+  button('当前这条记录',()=>{++compareSelectionVersion;state.left=state.trace;state.leftAttempt=0;render();},filters);
+  const matches=el('div',null,'compare-matches');picker.append(matches);
+  // Update only the result list so typing keeps keyboard focus.
+  const showMatches=()=>{
+    matches.replaceChildren();
+    const query=compareSearch.query.trim().toLowerCase();
+    const candidates=state.traces.filter(trace=>{
+      const group=conversationGroup(trace);
+      const groupKey=compareSearch.group==='same'?conversationGroup(state.trace).key:compareSearch.group;
+      return (groupKey==='all'||group.key===groupKey)&&`${trace.summary||''} ${trace.started_at||''} ${trace.sender_name||''} ${trace.sender_id||''} ${group.label} ${group.platform}`.toLowerCase().includes(query);
+    });
+    const pages=Math.max(1,Math.ceil(candidates.length/8));compareSearch.page=Math.min(compareSearch.page,pages-1);
+    matches.append(el('small',`匹配 ${candidates.length} 条已加载记录 · 第 ${compareSearch.page+1} / ${pages} 页`,'muted'));
+    for(const trace of candidates.slice(compareSearch.page*8,compareSearch.page*8+8)) {
+      const item=button('',async()=>{
+        const version=++compareSelectionVersion;
+        const left=(await api('detail',{id:trace.id})).trace;
+        if(version!==compareSelectionVersion)return;
+        state.left=left;state.leftAttempt=0;
+        if(state.tab==='compare')render();
+      },matches);
+      item.className='compare-record'+(state.left?.id===trace.id?' active':'');
+      item.setAttribute('aria-pressed',String(state.left?.id===trace.id));
+      item.append(el('strong',trace.summary||'无文本消息'),el('small',`${trace.started_at||''} · ${conversationGroup(trace).label} · ${trace.sender_name||trace.sender_id||''}${trace.id===state.trace.id?' · 当前记录':''}`));
+    }
+    if(!candidates.length)matches.append(el('div','没有匹配的记录。可清空搜索或切换到全部会话。','empty'));
+    if(pages>1) {
+      const pager=el('div',null,'toolbar');matches.append(pager);
+      button('上一页',()=>{compareSearch.page--;showMatches();},pager).disabled=compareSearch.page===0;
+      button('下一页',()=>{compareSearch.page++;showMatches();},pager).disabled=compareSearch.page+1>=pages;
+    }
+  };
+  search.oninput=()=>{compareSearch.query=search.value;compareSearch.page=0;showMatches();};
+  showMatches();
+  content.append(el('p',state.left?`已选比较对象：${state.left.started_at||''} · ${conversationGroup(state.left).label} · ${state.left.summary||'无文本消息'}`:'请选择上方的一条记录。','compare-selected'));
   const row=el('div',null,'toolbar');content.append(row);
-  const options=state.traces.map(t=>[t.id,`${t.started_at} · ${t.summary}`]);
-  select('比较对象',[['','请选择记录'],...options],state.left?.id||'',async id=>{if(!id)return;state.left=(await api('detail',{id})).trace;state.leftAttempt=0;render();},row);
-  select('对象请求',requests(state.left).map((r,i)=>[String(i),`第 ${i+1} 次 · ${r.provider||''}`]),String(state.leftAttempt),v=>{state.leftAttempt=Number(v);},row);
-  select('范围',[['base','提示词与工具'],['all','全部内容']],state.scope,v=>{state.scope=v;},row);
+  select('对象请求',requests(state.left).map((r,i)=>[String(i),`第 ${i+1} 次 · ${r.model||r.provider||'默认模型'}`]),String(state.leftAttempt),v=>{state.leftAttempt=Number(v);++compareSelectionVersion;output.replaceChildren();},row);
+  select('范围',[['base','提示词与工具'],['all','全部内容']],state.scope,v=>{state.scope=v;++compareSelectionVersion;output.replaceChildren();},row);
   const output=el('div');content.append(output);
-  button('显示差异',async()=>{
+  const compareButton=button('显示差异',async()=>{
     const left=requests(state.left)[state.leftAttempt],right=current();
     if(!left||!right)throw new Error('两边都需要选择已采集的模型请求。');
+    const version=++compareSelectionVersion;
     const result=await api('compare',{left:{trace_id:state.left.id,attempt_id:left.attempt_id},right:{trace_id:state.trace.id,attempt_id:right.attempt_id},scope:state.scope});
+    if(version!==compareSelectionVersion||state.tab!=='compare')return;
     output.replaceChildren();
     if(!result.lines.length)hint('所选范围没有变化。',output);
     const pre=el('pre');output.append(pre);
     for(const line of result.lines)pre.append(el('span',line,'diff-line'+(line.startsWith('+')?' add':line.startsWith('-')?' remove':'')));
     if(result.truncated)hint('差异超过 5000 行，仅显示前 5000 行。',output);
   },row);
+  const canCompare=!!current()&&!!requests(state.left)[state.leftAttempt];
+  compareButton.disabled=!canCompare;
+  compareButton.title=canCompare?'':'两边都需要选择已采集的模型请求。';
+  if(!canCompare)row.append(el('small','两边都需要选择已采集的模型请求。','muted'));
 }
 
 function usage() {
   const list=requests(state.trace);
   const responses=state.trace.stages.filter(s=>s.key==='model_response').map(dataOf);
-  const totals={input:0,output:0,cached:0};let reported=0;
+  let reported=0;
+  const requestEstimates=new Map();
+  const models=new Map();
+  for(const req of list) {
+    const key=JSON.stringify([req.provider||'',req.model||'']);
+    const summary=models.get(key)||{name:`${req.model||'未知模型'}${req.provider?` · ${req.provider}`:''}`,input:0,output:0,cached:0,requests:0,reported:0,counts:{input:0,output:0,cached:0},estimate:{系统指令:0,用户消息:0,历史回复:0,工具结果:0,其他:0,工具定义:0}};
+    summary.requests++;
+    models.set(key,summary);
+    const segments={系统指令:[],用户消息:[],历史回复:[],工具结果:[],其他:[],工具定义:req.tools||[]};
+    for(const message of req.messages||[]) (segments[{system:'系统指令',developer:'系统指令',user:'用户消息',assistant:'历史回复',tool:'工具结果'}[message.role]||'其他']).push(message);
+    const estimates={};
+    for(const [name,items]of Object.entries(segments)) {
+      estimates[name]=items.length?Math.ceil(JSON.stringify(items).length/4):0;
+      summary.estimate[name]+=estimates[name];
+    }
+    requestEstimates.set(req,estimates);
+    const u=responses.find(r=>r.attempt_id===req.attempt_id)?.response?.usage;
+    if(!u)continue;
+    reported++;
+    summary.reported++;
+    const values={input:u.input??(u.input_other!=null&&u.input_cached!=null?Number(u.input_other)+Number(u.input_cached):null),output:u.output,cached:u.input_cached};
+    for(const [field,value]of Object.entries(values)) {
+      if(value==null||!Number.isFinite(Number(value)))continue;
+      summary[field]+=Number(value);summary.counts[field]++;
+    }
+  }
+  if(!models.size) {
+    content.append(el('h2','Token 与耗时'),el('div','这条记录没有模型请求快照，无法汇总 Token 用量与耗时。','empty'));
+    return;
+  }
+  hint(`${reported} / ${list.length} 次请求有服务商用量记录。缓存命中包含在输入中；缺失、失败、截断或内部重试可能使统计不完整。内容粗估按序列化字符数 ÷ 4 累加，只包含输入消息和工具定义，不能用于确认账单。`,content);
+  for(const summary of models.values()) {
+    const box=card(summary.name,content);box.className+=' usage-model';
+    box.querySelector('h3').append(el('small',`${summary.requests} 次请求 · 回报 ${summary.reported} 次`,'muted'));
+    const reportedValues=[['累计输入','input'],['累计输出','output'],['缓存命中','cached']].map(([label,field])=>`${label} ${summary.counts[field]?summary[field].toLocaleString():'未提供'}`);
+    const reportedLine=el('p',null,'usage-line');reportedLine.append(el('strong','服务商回报总计：'),el('span',reportedValues.join(' · ')));box.append(reportedLine);
+    const estimatedValues=Object.entries(summary.estimate).map(([name,value])=>`${name} ≈ ${value.toLocaleString()}`);
+    const estimatedLine=el('p',null,'usage-line');estimatedLine.append(el('strong','内容分布粗估：'),el('span',estimatedValues.join(' · ')));box.append(estimatedLine);
+  }
+  content.append(el('h2','逐次请求'));
   for(const req of list) {
     const response=responses.find(r=>r.attempt_id===req.attempt_id);
     const u=response?.response?.usage;
     const box=card(`请求 ${list.indexOf(req)+1} · ${req.provider||'未知提供商'}`,content);
     if(u) {
       const input=u.input ?? ((u.input_other||0)+(u.input_cached||0));
-      reported++;totals.input+=input;totals.output+=u.output||0;totals.cached+=u.input_cached||0;
       box.append(el('p',`服务商回报：输入 ${input} · 输出 ${u.output??'未提供'} · 缓存输入 ${u.input_cached??'未提供'}`));
     } else box.append(el('p','服务商未提供用量；不会计为零。','muted'));
     box.append(el('p',`请求耗时：${response?.duration_ms ?? '未记录'} ms`));
-    const segments={系统指令:[],用户消息:[],历史回复:[],工具结果:[],其他:[]};
-    for(const m of req.messages||[]) (segments[{system:'系统指令',developer:'系统指令',user:'用户消息',assistant:'历史回复',tool:'工具结果'}[m.role]||'其他']).push(m);
-    const estimates={};
-    for(const [name,messages]of Object.entries(segments))estimates[name]=Math.ceil(JSON.stringify(messages).length/4);
-    estimates.工具定义=Math.ceil(JSON.stringify(req.tools||[]).length/4);
-    raw('内容分布粗估（序列化字符数 ÷ 4，非模型分词）',estimates,box);
+    raw('内容分布粗估（序列化字符数 ÷ 4，非模型分词）',requestEstimates.get(req),box);
   }
-  const total=card('本次对话 · 已回报用量合计',content);
-  total.append(el('p',reported?`输入 ${totals.input} · 输出 ${totals.output} · 缓存输入 ${totals.cached}（包含在输入中）`:'没有可汇总的服务商用量。'));
-  hint(`${reported} / ${list.length} 次请求有用量记录。缺失、失败、截断及 Provider 内部重试可能使合计不完整。粗估不包含真实媒体计费，也不能用来确认账单或上下文容量。`,content);
 }
 
 function settings() {

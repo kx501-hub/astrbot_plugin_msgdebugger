@@ -49,8 +49,17 @@ nav button.active { background:var(--accent); color:white; }
 .journey button { padding:2px 7px; font-size:12px; }
 .journey button.active { border-color:var(--accent); background:var(--soft); color:var(--accent); }
 .card { background:var(--surface); border:1px solid var(--line); border-radius:6px; padding:10px 12px; margin:7px 0; overflow:hidden; }
+.compare .compare-record { display:block; width:100%; min-width:0; text-align:left; padding:6px 8px; margin:4px 0; white-space:normal; overflow-wrap:anywhere; }
+.compare .compare-record strong,.compare .compare-record small { display:block; }
+.compare .compare-record small { color:var(--muted); }
+.compare .compare-record.active { background:var(--soft); border-color:var(--accent); }
+.compare .compare-selected { overflow-wrap:anywhere; }
+.compare .card .toolbar input[type=search] { flex:0 1 320px; min-width:0; max-width:100%; }
 .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:6px; }
 .stat { font-size:21px; font-weight:650; }
+.usage-model { overflow-wrap:anywhere; }
+.usage-model>h3 small { margin-left:7px; font-weight:400; }
+.usage-model .usage-line { margin:4px 0; }
 .badge { display:inline-block; padding:1px 6px; border-radius:4px; background:var(--soft); color:var(--accent); font-size:11px; margin:0 5px 3px 0; }
 .bad { color:var(--bad); }.good { color:var(--good); }
 .empty { padding:18px 12px; color:var(--muted); border:1px dashed var(--line); border-radius:6px; }
@@ -124,6 +133,13 @@ details { margin:4px 0; }
 .input-summary { gap:4px 10px; margin:4px 0; }
 .input-summary>span:last-child { font-size:11px; }
 .input .message-explorer { height:clamp(320px,55vh,680px); }
+@media(min-width:651px) {
+  #content.input { display:flex; flex-direction:column; }
+  #content.input>* { flex-shrink:0; }
+  #content.input .message-explorer { flex:1 0 320px; height:auto; min-height:320px; grid-template-rows:minmax(0,1fr); }
+  .input .message-directory,.input .message-reader { min-height:0; }
+}
+.input .message-directory { position:relative; }
 @media(max-width:650px) {
   .input .message-explorer { height:auto; }
   .toolbar input[type=search],.tools>.toolbar input[type=search],.skills>.toolbar input[type=search] { flex-basis:100%; min-width:100%; max-width:100%; }
