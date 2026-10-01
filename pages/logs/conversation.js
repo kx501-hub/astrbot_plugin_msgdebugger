@@ -113,9 +113,10 @@ export function inputView(trace,req,state,parent,rerender,open) {
   guide.open=state.guideOpen;
   guide.ontoggle=()=>{state.guideOpen=guide.open;};
   guide.append(el('summary','如何读这份请求快照'));
-  guide.append(el('p','消息序号是一次请求中 messages 的排列顺序，不是模型调用次数。历史消息会随请求重新发送；输入中的 assistant 是历史回复或工具调用要求，本次输出在目录下方单独展示。'));
-  guide.append(el('p','tools 是提供给模型的工具定义；模型要求调用、工具实际执行、工具返回结果是不同阶段，可结合过程总览查看。'));
-  guide.append(el('p','AstrBot 可能把时间、引用和插件附加内容拼进 user，因此最后一条 user 不一定等于原始消息。额外内容可能已经并入 messages，分析时避免重复计算。'));
+  guide.append(el('p','消息序号是一次请求中 messages 字段附带消息的排列顺序，不是模型调用次数；输入中的 assistant 包含历史回复或工具调用要求。'));
+  guide.append(el('p','tools 是随请求发送的工具目录，模型在生成本次回复时就能看到，并非需要时才读取。工具定义通常也计入输入 Token。'));
+  guide.append(el('p','extra_user_content_parts 是 AstrBot 内部字段，仅在内部使用。AstrBot 用它暂存引用内容、图片或插件附加文本等，并在组装请求时追加到 user 消息；不同 Provider 会负责转换成相应格式。因此原始快照里它可能与 messages 中的内容重复，分析或估算 Token 时不要重复计算。'));
+  guide.append(el('p','AstrBot 可能把时间、引用和插件附加内容拼进 user，因此最后一条 user 不一定等于原始消息。'));
   const example=el('div',null,'example-flow');
   for(const text of ['system：你是简洁的助手','user：帮我查天气','assistant：要求调用 weather','tool：晴 28℃','本次输出：assistant'])example.append(el('span',text));
   guide.append(example,el('p','前四项是本次输入，最后一项是生成的输出。执行工具后再次请求模型时，工具调用要求和结果会作为上下文带回；实际排列以消息序号为准。'));
@@ -126,7 +127,7 @@ export function inputView(trace,req,state,parent,rerender,open) {
     return;
   }
   const top=el('div',null,'input-summary');
-  top.append(el('strong',`一次请求 · ${messages.length} 条输入消息 · ${req.tools?.length || 0} 个可用工具`),el('span','序号是 messages 内的排列位置，不是模型调用次数。','muted'));
+  top.append(el('strong',`一次请求 · ${messages.length} 条输入消息 · ${req.tools?.length || 0} 个可用工具`));
   parent.append(top);
   const allRequests=trace.stages.filter(s=>s.key==='model_request'&&dataOf(s).attempt_id).map(dataOf);
   const position=allRequests.findIndex(r=>r.attempt_id===req.attempt_id);
@@ -135,17 +136,19 @@ export function inputView(trace,req,state,parent,rerender,open) {
   if(previousMessages) {
     while(common<messages.length&&common<previousMessages.length&&JSON.stringify(messages[common])===JSON.stringify(previousMessages[common]))common++;
     top.append(el('span',common===messages.length&&common===previousMessages.length?'与上一请求的消息列表相同。':`与上一请求相比：前 ${common} 条一致，后 ${messages.length-common} 条可能新增或变化。`,'muted'));
-  } else if(lastUser>0)top.append(el('span',`建议先读最后一条 user；前面的 ${lastUser} 条上下文收在目录里。`,'muted'));
+  }
+  top.append(el('span',`序号表示 messages 内的排列位置，不是模型调用次数${lastUser>0?`；建议先读最后一条 user，前面的 ${lastUser} 条是上下文`:''}。`,'muted'));
   const shortcuts=el('div',null,'toolbar');parent.append(shortcuts);
   button('从最后一条 user 开始',()=>{state.inputFilter='all';state.inputQuery='';state.messageIndex=lastUser>=0?lastUser:0;rerender();},shortcuts);
   if(previousMessages&&common<messages.length)button('定位本次新增 / 变化处',()=>{state.inputFilter='all';state.inputQuery='';state.messageIndex=common;rerender();},shortcuts);
   button('只看全局指令',()=>{state.inputFilter='instructions';state.messageIndex=null;state.messagePage=0;rerender();},shortcuts);
   button(`查看工具目录（${req.tools?.length||0}）`,()=>open('tools'),shortcuts);
-  const filters=el('div',null,'toolbar');parent.append(filters);
+  const filters=el('div',null,'toolbar input-filters');parent.append(filters);
   select('消息范围',[['all','全部（原始顺序）'],['instructions','system / developer'],['user','user 输入材料'],['assistant','assistant 发言'],['tool','tool 工具结果']],state.inputFilter,v=>{state.inputFilter=v;state.messagePage=0;state.messageIndex=null;rerender();},filters);
-  const search=el('input');search.type='search';search.placeholder='搜索消息内容，按 Enter';search.value=state.inputQuery;search.setAttribute('aria-label','搜索模型输入');
-  search.onkeydown=event=>{if(event.key==='Enter'){state.inputQuery=search.value;state.messagePage=0;state.messageIndex=null;rerender();}};
+  const search=el('input');search.type='search';search.placeholder='搜索消息内容';search.value=state.inputQuery;search.setAttribute('aria-label','搜索模型输入');
   filters.append(search);
+  const searchButton=button('搜索',()=>{state.inputQuery=search.value;state.messagePage=0;state.messageIndex=null;rerender();},filters);
+  search.onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();searchButton.click();}};
   const visible=messages.map((message,index)=>({message,index})).filter(({message})=>(state.inputFilter==='all'||(state.inputFilter==='instructions'?['system','developer'].includes(message?.role):message?.role===state.inputFilter))&&JSON.stringify(message).toLowerCase().includes(state.inputQuery.toLowerCase()));
   if(!visible.length){hint('没有符合筛选条件的消息。',parent);return;}
   if(state.messageIndex===null||!visible.some(v=>v.index===state.messageIndex)) {

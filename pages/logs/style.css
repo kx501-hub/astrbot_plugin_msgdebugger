@@ -54,7 +54,7 @@ nav button.active { background:var(--accent); color:white; }
 .compare .compare-record small { color:var(--muted); }
 .compare .compare-record.active { background:var(--soft); border-color:var(--accent); }
 .compare .compare-selected { overflow-wrap:anywhere; }
-.compare .card .toolbar input[type=search] { flex:0 1 320px; min-width:0; max-width:100%; }
+.compare .card .toolbar input[type=search] { flex:0 1 240px; width:240px; min-width:160px; max-width:100%; }
 .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:6px; }
 .stat { font-size:21px; font-weight:650; }
 .usage-model { overflow-wrap:anywhere; }
@@ -70,7 +70,8 @@ nav button.active { background:var(--accent); color:white; }
 .toolbar select { max-width:100%; min-width:100px; }
 .toolbar label select { min-width:0; }
 .toolbar input[type=search] { flex:1 1 320px; min-width:280px; max-width:440px; }
-.tools>.toolbar input[type=search],.skills>.toolbar input[type=search] { flex:0 1 360px; width:360px; min-width:240px; max-width:100%; }
+.tools>.toolbar input[type=search],.skills>.toolbar input[type=search] { flex:0 1 240px; width:240px; min-width:160px; max-width:100%; }
+.input-filters input[type=search] { flex:0 1 240px; width:240px; min-width:160px; max-width:100%; }
 pre { white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace; background:var(--bg); padding:10px; border-radius:5px; max-height:48vh; overflow:auto; margin:6px 0; }
 summary { cursor:pointer; color:var(--accent); padding:4px 0; }
 details { margin:4px 0; }
@@ -143,4 +144,7 @@ details { margin:4px 0; }
 @media(max-width:650px) {
   .input .message-explorer { height:auto; }
   .toolbar input[type=search],.tools>.toolbar input[type=search],.skills>.toolbar input[type=search] { flex-basis:100%; min-width:100%; max-width:100%; }
+  .tools>.toolbar input[type=search],.skills>.toolbar input[type=search] { flex:0 1 66%; width:auto; min-width:0; max-width:66%; }
+  .input-filters input[type=search] { flex:0 1 66%; width:auto; min-width:0; max-width:66%; }
+  .compare .card .compare-filters input[type=search] { flex:0 1 66%; width:auto; min-width:0; max-width:66%; }
 }

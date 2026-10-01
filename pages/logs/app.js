@@ -5,11 +5,11 @@ import {conversationGroup, buildJourney, overviewView, inputView} from './conver
 const bridge = window.AstrBotPluginPage;
 const tabs = [['overview','过程总览'],['input','模型输入'],['plugins','插件改动'],['tools','工具'],['skills','Skills'],['compare','请求对比'],['usage','Token 与耗时'],['settings','复读与采集']];
 const labels = {inbound:'收到消息',request_snapshot:'准备模型请求',model_request:'请求模型',model_response:'模型返回',model_error:'模型请求异常',model_interrupted:'模型请求中断',plugin_change:'插件执行',tool_start:'调用工具',tool_end:'工具返回',llm_response:'Agent 输出',decorating:'发送前处理',sent:'发送完成',echo_start:'复读开始',echo_sent:'主动复读返回',echo_error:'复读失败',extension:'插件补充报告'};
-const state = {traces:[], trace:null, tab:'overview', attempt:0, runtime:{}, inventory:null, left:null, leftAttempt:0, scope:'base', changesOnly:true, groupOpen:new Map(), groupPages:new Map(), messageIndex:null, messagePage:0, inputFilter:'all', inputQuery:'', guideOpen:false, toolCatalogScope:'request', toolQuery:'', toolPage:0, skillCatalogScope:'request', skillQuery:'', skillPage:0};
+const state = {traces:[], trace:null, tab:'overview', attempt:0, runtime:{}, inventory:null, left:null, leftAttempt:0, scope:'base', changesOnly:true, groupOpen:new Map(), groupPages:new Map(), messageIndex:null, messagePage:0, inputFilter:'all', inputQuery:'', guideOpen:false, toolCatalogScope:'request', toolQuery:'', toolPage:0, toolStatusFilter:'all', skillCatalogScope:'request', skillQuery:'', skillPage:0, skillStatusFilter:'all'};
 let busy = false;
 let selectionVersion = 0;
 let compareSelectionVersion = 0;
-const compareSearch = {query:'', group:'same', page:0};
+const compareSearch = {query:'', draft:'', group:'same', page:0};
 const content = document.querySelector('#content');
 const requests = trace => (trace?.stages || []).filter(s => s.key === 'model_request' && dataOf(s).attempt_id).map(dataOf);
 const current = () => requests(state.trace)[state.attempt];
@@ -36,7 +36,7 @@ async function choose(id) {
   const result = await api('detail', {id});
   if (version !== selectionVersion) return;
   if(state.trace?.id !== id) {
-    compareSearch.query='';compareSearch.group='same';compareSearch.page=0;
+    compareSearch.query='';compareSearch.draft='';compareSearch.group='same';compareSearch.page=0;
     state.tab='overview';state.attempt=0;state.messageIndex=null;state.messagePage=0;state.inputFilter='all';state.inputQuery='';state.toolCatalogScope='request';state.toolQuery='';state.toolPage=0;state.skillCatalogScope='request';state.skillQuery='';state.skillPage=0;
   }
   state.trace = result.trace;
@@ -254,13 +254,17 @@ function tools() {
     state.toolCatalogScope=v;render();
   },catalogControls);
   else state.toolCatalogScope='live';
+  select('启用状态',[['all','全部'],['enabled','已启用'],['disabled','未启用']],state.toolStatusFilter,v=>{state.toolStatusFilter=v;state.toolPage=0;render();},catalogControls);
   const toolSearch=el('input');toolSearch.type='search';toolSearch.placeholder='搜索工具名、说明或来源';toolSearch.value=state.toolQuery;
   toolSearch.oninput=()=>{state.toolQuery=toolSearch.value;};
   toolSearch.onkeydown=event=>{if(event.key==='Enter'){state.toolPage=0;render();}};catalogControls.append(toolSearch);
   button('搜索',()=>{state.toolPage=0;render();},catalogControls);
   const source=state.toolCatalogScope==='request'&&hasRequest?offered:(state.inventory?.tools||[]);
   const query=state.toolQuery.trim().toLowerCase();
-  const filtered=source.filter(tool=>`${tool.name||''} ${tool.description||''} ${tool.source||''}`.toLowerCase().includes(query));
+  const filtered=source.filter(tool=>
+    (state.toolStatusFilter==='all'||(state.toolStatusFilter==='enabled'?tool.active===true:tool.active===false))&&
+    `${tool.name||''} ${tool.description||''} ${tool.source||''}`.toLowerCase().includes(query)
+  );
   const pages=Math.max(1,Math.ceil(filtered.length/20));state.toolPage=Math.min(state.toolPage,pages-1);
   content.append(el('p',`${state.toolCatalogScope==='request'&&hasRequest?`请求 ${state.attempt+1} 提供给模型的工具`:'当前实时注册'} ${source.length} 个 · 当前显示 ${filtered.length} 个匹配项`,'muted'));
   if(!filtered.length) content.append(el('div',source.length?'没有符合搜索条件的工具。':state.toolCatalogScope==='request'?'这次请求没有提供工具。可切换到“实时注册”查看全部目录。':state.inventory?'没有可显示的工具。':'正在加载工具目录…','empty'));
@@ -292,6 +296,7 @@ function skills() {
   requestPicker(controls,true);
   if(req) select('查看',[['request',`本次携带 · ${offered.length}`],['local',`本地文件 · ${list.length}`]],state.skillCatalogScope,v=>{state.skillCatalogScope=v;state.skillPage=0;render();},controls);
   else state.skillCatalogScope='local';
+  select('启用状态',[['all','全部'],['enabled','已启用'],['disabled','未启用']],state.skillStatusFilter,v=>{state.skillStatusFilter=v;state.skillPage=0;render();},controls);
   const skillSearch=el('input');skillSearch.type='search';skillSearch.placeholder='搜索 Skill 名、说明或来源';skillSearch.value=state.skillQuery;
   skillSearch.oninput=()=>{state.skillQuery=skillSearch.value;};
   skillSearch.onkeydown=event=>{if(event.key==='Enter'){state.skillPage=0;render();}};controls.append(skillSearch);
@@ -299,7 +304,12 @@ function skills() {
   if(state.skillCatalogScope==='local') button('刷新当前目录',async()=>{state.inventory=await api('inventory');render();},controls);
   const source=state.skillCatalogScope==='request'&&req?offered:list;
   const query=state.skillQuery.trim().toLowerCase();
-  const filtered=source.filter(skill=>`${skill.name||''} ${skill.description||''} ${skill.path||''} ${skill.plugin_name||''} ${skill.source_label||''} ${skill.source_type||''}`.toLowerCase().includes(query));
+  const filtered=source.filter(skill=>{
+    const isEnabled=state.skillCatalogScope==='request'&&req?true:skill.active===true;
+    const isDisabled=state.skillCatalogScope==='request'&&req?false:skill.active===false;
+    return (state.skillStatusFilter==='all'||(state.skillStatusFilter==='enabled'?isEnabled:isDisabled))&&
+      `${skill.name||''} ${skill.description||''} ${skill.path||''} ${skill.plugin_name||''} ${skill.source_label||''} ${skill.source_type||''}`.toLowerCase().includes(query);
+  });
   const pages=Math.max(1,Math.ceil(filtered.length/20));state.skillPage=Math.min(state.skillPage,pages-1);
   content.append(el('p',state.skillCatalogScope==='request'&&req?`本次携带 ${offered.length} 项 · 当前显示 ${filtered.length} 项`:`本地文件 ${list.length} 项 · 技能开关开启 ${enabled} 项 · 当前显示 ${filtered.length} 项`,'muted'));
   if(!filtered.length) content.append(el('div',source.length?'没有符合搜索条件的 Skill。':state.skillCatalogScope==='request'?'这份请求中没有识别到 Skills。全部停用时这是正常的。':state.inventory?'当前没有可读取的 Skills。':'正在加载 Skills…','empty'));
@@ -331,11 +341,14 @@ function compare() {
   picker.open=compareSearch.open!==false;
   const pickerTitle=el('summary','查找比较对象');picker.append(pickerTitle);content.append(picker);
   picker.ontoggle=()=>{compareSearch.open=picker.open;};
-  const filters=el('div',null,'toolbar');picker.append(filters);
+  const filters=el('div',null,'toolbar compare-filters');picker.append(filters);
   const groups=new Map(state.traces.map(trace=>{const group=conversationGroup(trace);return [group.key,`${group.label} · ${group.platform}`];}));
   select('会话',[['same','当前会话'],['all','全部会话'],...groups],compareSearch.group,value=>{compareSearch.group=value;compareSearch.page=0;render();},filters);
-  const search=el('input');search.type='search';search.placeholder='搜索消息摘要、发送者或时间';search.value=compareSearch.query;
+  const search=el('input');search.type='search';search.placeholder='搜索消息摘要、发送者或时间';search.value=compareSearch.draft;
   search.setAttribute('aria-label','搜索比较记录');filters.append(search);
+  search.oninput=()=>{compareSearch.draft=search.value;};
+  const searchButton=button('搜索',()=>{compareSearch.query=compareSearch.draft;compareSearch.page=0;showMatches();},filters);
+  search.onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();searchButton.click();}};
   button('当前这条记录',()=>{++compareSelectionVersion;state.left=state.trace;state.leftAttempt=0;render();},filters);
   const matches=el('div',null,'compare-matches');picker.append(matches);
   // Update only the result list so typing keeps keyboard focus.
@@ -368,7 +381,6 @@ function compare() {
       button('下一页',()=>{compareSearch.page++;showMatches();},pager).disabled=compareSearch.page+1>=pages;
     }
   };
-  search.oninput=()=>{compareSearch.query=search.value;compareSearch.page=0;showMatches();};
   showMatches();
   content.append(el('p',state.left?`已选比较对象：${state.left.started_at||''} · ${conversationGroup(state.left).label} · ${state.left.summary||'无文本消息'}`:'请选择上方的一条记录。','compare-selected'));
   const row=el('div',null,'toolbar');content.append(row);
