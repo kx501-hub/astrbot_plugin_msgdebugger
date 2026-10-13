@@ -1,6 +1,6 @@
 # 从一条消息开始排查
 
-入口不变：AstrBot WebUI → 插件 → MsgDebugger → Pages → **logs**。
+入口不变：AstrBot WebUI → 插件/Pages → MsgDebugger。
 
 ## 推荐阅读顺序
 
