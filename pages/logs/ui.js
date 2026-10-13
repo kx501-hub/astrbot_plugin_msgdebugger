@@ -44,5 +44,14 @@ export function select(label, options, value, action, parent) {
   parent.append(wrapper);
   return node;
 }
+export function searchBox(placeholder, value, action, parent) {
+  const input=el('input');input.type='search';input.placeholder=placeholder;input.value=value;
+  input.setAttribute('aria-label',placeholder);parent.append(input);
+  const submit=button('搜索',()=>action(input.value.trim()),parent);
+  input.onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();submit.click();}};
+  input.onsearch=()=>{if(!input.value)submit.click();};
+  if(value)button('清空',()=>{input.value='';return action('');},parent);
+  return input;
+}
 export function hint(text, parent) { parent.append(el('p', text, 'hint')); }
 export const dataOf = stage => stage?.fields?.find(field => field.key === 'detail')?.json || {};

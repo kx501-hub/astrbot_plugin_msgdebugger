@@ -1,8 +1,8 @@
-import {el, card, raw, button, select, hint, dataOf} from './ui.js';
+import {el, card, raw, button, select, searchBox, hint, dataOf} from './ui.js';
 
 export const roles = {system:'system · 全局指令',developer:'developer · 应用指令',user:'user · 输入材料',assistant:'assistant · 模型发言',tool:'tool · 工具返回'};
 const meanings = {
-  system:'告诉模型如何工作，例如人格、规则、技能目录。通常放在前面，但请以左侧实际顺序为准。',
+  system:'告诉模型如何工作，例如人格、规则、技能目录。通常放在前面，以消息目录中的实际顺序为准。',
   developer:'应用提供的行为要求。有些 API 使用这个角色；没有它也是正常的。',
   user:'输入给模型的问题或材料。AstrBot 也可能在这里拼接时间、引用、插件附加内容。',
   assistant:'模型一方的发言。出现在请求里时，它是被带回来的上下文，可能是以前的回复，也可能是要求调用工具；不是本次请求刚生成的回答。',
@@ -29,16 +29,16 @@ export function buildJourney(trace) {
     } else if(stage.key==='tool_start') {
       const data=dataOf(stage);
       last={kind:'tool',title:`${data.agent_scope==='nested'?'子代理工具':'工具'} · ${data.tool?.name || '未知工具'}`,stages:[]};blocks.push(last);
-    } else if(stage.key==='tool_end' && last?.kind!=='tool') {
+    } else if(stage.key==='tool_end' && (last?.kind!=='tool' || last.stages.some(s=>s.key==='tool_end') || !last.stages.some(s=>s.key==='tool_start' && dataOf(s).tool?.name===dataOf(stage).tool?.name && (dataOf(s).agent_scope||'main')===(dataOf(stage).agent_scope||'main')))) {
       const data=dataOf(stage);
       const scope=data.agent_scope==='nested'?'子代理工具':'工具';
       last={kind:'tool',title:`${scope} · ${data.tool?.name || '未知工具'}`,stages:[]};blocks.push(last);
     } else if(stage.key==='llm_response') {
-      last={kind:'output',title:'Agent 输出',stages:[]};blocks.push(last);
+      last={kind:'output',title:'代理输出',stages:[]};blocks.push(last);
     } else if(stage.key==='decorating' && last?.kind!=='decorate') {
       last={kind:'decorate',title:'发送前处理',stages:[]};blocks.push(last);
     } else if(stage.key==='sent') {
-      last={kind:'sent',title:'发送完成',stages:[]};blocks.push(last);
+      last={kind:'sent',title:'发送通知',stages:[]};blocks.push(last);
     } else if(['echo_start','echo_sent','echo_error'].includes(stage.key) && last?.kind!=='echo') {
       last={kind:'echo',title:'复读发送',stages:[]};blocks.push(last);
     } else if(!last) {
@@ -56,21 +56,23 @@ export function overviewView(trace,parent,open) {
   const inbound=stages.find(s=>s.key==='inbound');
   const replies=stages.filter(s=>s.key==='llm_response'||s.key==='model_response');
   const final=dataOf(replies.at(-1)).response;
-  const start=card('从这里开始：这一条消息发生了什么',parent);
+  const start=card('这条消息的处理过程',parent);
   start.append(el('p',`收到「${String(dataOf(inbound).text || trace.summary || '无文本消息').slice(0,180)}」后，已观测到 ${requests.length} 次模型请求、${stages.filter(s=>s.key==='tool_start').length} 次工具执行。`));
   const changed=[...new Set(stages.filter(s=>s.key==='plugin_change'&&dataOf(s).changed).map(s=>dataOf(s).source))];
   if(changed.length) start.append(el('p',`这些插件执行期间有改动：${changed.join('、')}。`));
   const reply=final?._completion_text || (final?.result_chain?.chain || []).filter(p=>p.type==='Plain'||p.type==='plain'||p.text).map(p=>p.text||'').join('');
   if(reply) raw('最后观测到的模型回复',reply,start);
   const sent=stages.some(s=>s.key==='sent'||s.key==='echo_sent');
-  start.append(el('p',sent?'已观测到发送通知 / 主动发送返回。':'尚未观测到发送完成：可能仍在执行，也可能未覆盖该路径。','muted'));
+  start.append(el('p',sent?'已记录发送通知或主动发送返回，不代表对方已收到。':'尚未采集到发送通知或主动发送返回。','muted'));
   const steps=el('div',null,'toolbar');start.append(steps);
   button('① 看模型收到什么',()=>open('input',0),steps);
   button('② 找哪个插件改了内容',()=>open('plugins'),steps);
   button('③ 比较两次请求',()=>open('compare'),steps);
-  hint('下面按采集顺序串起整条记录。一次请求可以携带几十条历史消息；只有再次调用模型，才算下一次请求。',parent);
+  parent.append(el('p','按采集顺序展示，展开查看详情。','muted'));
   for(const block of blocks) {
     const detail=el('details',null,'flow-block');
+    detail.id=`flow-${stages.indexOf(block.stages[0])}`;
+    detail.dataset.readKey=detail.id;
     const summary=el('summary');
     const parts=[];
     const changes=block.stages.filter(s=>s.key==='plugin_change'&&dataOf(s).changed);
@@ -86,19 +88,21 @@ export function overviewView(trace,parent,open) {
     if(changes.length)parts.push(`${changes.length} 次插件改动`);
     if(block.kind==='tool') {
       const ended=block.stages.find(s=>s.key==='tool_end');
-      parts.push(ended ? (dataOf(ended).error?'执行失败':'执行完成') : '执行中');
+      // Starts and returns can be separated by nested model requests. Keep
+      // event labels factual instead of inferring a live execution status.
+      parts.push(ended ? (dataOf(ended).error?'返回异常':'已采集到返回') : '开始调用');
     }
-    summary.append(el('strong',block.title),el('span',parts.join(' · ') || `${block.stages.length} 个已观测阶段`,'muted'));
+    summary.append(el('strong',block.title),el('span',parts.join(' · ') || `${block.stages.length} 条过程记录`,'muted'));
     detail.append(summary);parent.append(detail);
     if(block.kind==='request')button('查看这次请求的输入',()=>open('input',block.attempt),detail);
-    if(changes.length)button('查看插件改动',()=>open('plugins'),detail);
+    if(changes.length)button('查看插件改动',()=>open('plugins',undefined,`plugin-${stages.indexOf(changes[0])}`),detail);
     for(const stage of block.stages) {
       const d=dataOf(stage);
       let title;
       if(stage.key==='plugin_change') {
         if(!d.changed&&!d.error)continue;
         title=`插件 ${d.source || '未知'} · ${d.changed?'改动了 '+Object.keys(d.after||{}).filter(k=>JSON.stringify(d.before?.[k])!==JSON.stringify(d.after?.[k])).join('、'):'执行异常'}`;
-      } else title=({inbound:'收到原始消息',request_snapshot:'准备请求快照',model_request:'将输入交给模型',model_response:'收到模型响应',model_error:'模型请求异常',model_interrupted:'模型请求中断（未取得完整响应）',tool_start:'工具参数',tool_end:d.error?'执行失败详情':'工具返回内容',llm_response:'Agent 输出',decorating:'处理即将发送的消息',sent:'AstrBot 发出发送通知',echo_start:'复读开始',echo_sent:'主动复读返回',echo_error:'复读异常',extension:'插件补充报告'})[stage.key]||stage.key;
+      } else title=({inbound:'收到原始消息',request_snapshot:'准备请求快照',model_request:'将输入交给模型',model_response:'收到模型响应',model_error:'模型请求异常',model_interrupted:'模型请求中断（未取得完整响应）',tool_start:'工具参数',tool_end:d.error?'执行失败详情':'工具返回内容',llm_response:'代理输出',decorating:'处理即将发送的消息',sent:'AstrBot 发出发送通知',echo_start:'复读开始',echo_sent:'主动复读返回',echo_error:'复读异常',extension:'插件补充报告'})[stage.key]||stage.key;
       if(stage.key==='model_error' && d.error==='GeneratorExit' && stages.some(s=>s.key==='model_response' && dataOf(s).attempt_id===d.attempt_id)) title='响应返回后迭代器关闭';
       if(d.tool?.name && !['tool_start','tool_end'].includes(stage.key)) title+=` · ${d.tool.name}`;
       raw(`${stage.at || ''} ${title}`,Object.keys(d).length?d:stage.fields,detail);
@@ -137,7 +141,7 @@ export function inputView(trace,req,state,parent,rerender,open) {
     while(common<messages.length&&common<previousMessages.length&&JSON.stringify(messages[common])===JSON.stringify(previousMessages[common]))common++;
     top.append(el('span',common===messages.length&&common===previousMessages.length?'与上一请求的消息列表相同。':`与上一请求相比：前 ${common} 条一致，后 ${messages.length-common} 条可能新增或变化。`,'muted'));
   }
-  top.append(el('span',`序号表示 messages 内的排列位置，不是模型调用次数${lastUser>0?`；建议先读最后一条 user，前面的 ${lastUser} 条是上下文`:''}。`,'muted'));
+  top.append(el('span','序号是 messages 中的位置，不是模型调用次数。','muted'));
   const shortcuts=el('div',null,'toolbar');parent.append(shortcuts);
   button('从最后一条 user 开始',()=>{state.inputFilter='all';state.inputQuery='';state.messageIndex=lastUser>=0?lastUser:0;rerender();},shortcuts);
   if(previousMessages&&common<messages.length)button('定位本次新增 / 变化处',()=>{state.inputFilter='all';state.inputQuery='';state.messageIndex=common;rerender();},shortcuts);
@@ -145,10 +149,7 @@ export function inputView(trace,req,state,parent,rerender,open) {
   button(`查看工具目录（${req.tools?.length||0}）`,()=>open('tools'),shortcuts);
   const filters=el('div',null,'toolbar input-filters');parent.append(filters);
   select('消息范围',[['all','全部（原始顺序）'],['instructions','system / developer'],['user','user 输入材料'],['assistant','assistant 发言'],['tool','tool 工具结果']],state.inputFilter,v=>{state.inputFilter=v;state.messagePage=0;state.messageIndex=null;rerender();},filters);
-  const search=el('input');search.type='search';search.placeholder='搜索消息内容';search.value=state.inputQuery;search.setAttribute('aria-label','搜索模型输入');
-  filters.append(search);
-  const searchButton=button('搜索',()=>{state.inputQuery=search.value;state.messagePage=0;state.messageIndex=null;rerender();},filters);
-  search.onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();searchButton.click();}};
+  searchBox('搜索消息内容',state.inputQuery,value=>{state.inputQuery=value;state.messagePage=0;state.messageIndex=null;rerender();},filters);
   const visible=messages.map((message,index)=>({message,index})).filter(({message})=>(state.inputFilter==='all'||(state.inputFilter==='instructions'?['system','developer'].includes(message?.role):message?.role===state.inputFilter))&&JSON.stringify(message).toLowerCase().includes(state.inputQuery.toLowerCase()));
   if(!visible.length){hint('没有符合筛选条件的消息。',parent);return;}
   if(state.messageIndex===null||!visible.some(v=>v.index===state.messageIndex)) {
@@ -174,8 +175,9 @@ export function inputView(trace,req,state,parent,rerender,open) {
   });
   const index=state.messageIndex,message=messages[index];
   const reader=el('article',null,'message-reader');explorer.append(reader);
+  reader.dataset.readKey=`message-${index}`;
   reader.append(el('h3',`#${index+1} ${roles[message?.role] || '未知角色 / 采集标记'}`),el('p',meanings[message?.role] || '请查看原始结构以识别这个标记。','muted'));
-  if(index===lastUser)reader.append(el('p','这是请求中最后一条 user，适合先看；它可能已混入插件附加材料，不能直接当作原始用户消息。','location-note'));
+  if(index===lastUser)reader.append(el('p','最后一条 user，可能包含插件附加内容。','location-note'));
   const previous=messages[index-1],next=messages[index+1];
   reader.append(el('small',`排列位置：${previous?`#${index} ${previous.role || '未知'}`:'列表起点'} → 当前 → ${next?`#${index+2} ${next.role || '未知'}`:'列表终点，等待模型生成下一条输出'}`,'muted'));
   reader.append(el('pre',typeof message?.content==='string'?message.content:JSON.stringify(message?.content??message,null,2),'message-body'));

@@ -1,14 +1,19 @@
-import {el, card, raw, button, select, hint, dataOf} from './ui.js';
+import {el, card, raw, button, select, searchBox, hint, dataOf} from './ui.js';
 import {requestSkills} from './skills.js';
 import {conversationGroup, buildJourney, overviewView, inputView} from './conversation.js';
 
 const bridge = window.AstrBotPluginPage;
-const tabs = [['overview','过程总览'],['input','模型输入'],['plugins','插件改动'],['tools','工具'],['skills','Skills'],['compare','请求对比'],['usage','Token 与耗时'],['settings','复读与采集']];
-const labels = {inbound:'收到消息',request_snapshot:'准备模型请求',model_request:'请求模型',model_response:'模型返回',model_error:'模型请求异常',model_interrupted:'模型请求中断',plugin_change:'插件执行',tool_start:'调用工具',tool_end:'工具返回',llm_response:'Agent 输出',decorating:'发送前处理',sent:'发送完成',echo_start:'复读开始',echo_sent:'主动复读返回',echo_error:'复读失败',extension:'插件补充报告'};
+const tabs = [['overview','过程总览'],['input','模型输入'],['plugins','插件改动'],['tools','工具'],['skills','技能'],['compare','请求对比'],['usage','Token 与耗时'],['settings','复读与采集']];
+const labels = {inbound:'收到消息',request_snapshot:'准备模型请求',model_request:'请求模型',model_response:'模型返回',model_error:'模型请求异常',model_interrupted:'模型请求中断',plugin_change:'插件执行',tool_start:'调用工具',tool_end:'工具返回',llm_response:'代理输出',decorating:'发送前处理',sent:'发送通知',echo_start:'复读开始',echo_sent:'主动复读返回',echo_error:'复读失败',extension:'插件补充报告'};
 const state = {traces:[], trace:null, tab:'overview', attempt:0, runtime:{}, inventory:null, left:null, leftAttempt:0, scope:'base', changesOnly:true, groupOpen:new Map(), groupPages:new Map(), messageIndex:null, messagePage:0, inputFilter:'all', inputQuery:'', guideOpen:false, toolCatalogScope:'request', toolQuery:'', toolPage:0, toolStatusFilter:'all', skillCatalogScope:'request', skillQuery:'', skillPage:0, skillStatusFilter:'all'};
 let busy = false;
 let selectionVersion = 0;
 let compareSelectionVersion = 0;
+const readingViews = new Map();
+let renderedView = null;
+let readingTrace = null;
+let resetReading = false;
+let pendingTarget = null;
 const compareSearch = {query:'', draft:'', group:'same', page:0};
 const content = document.querySelector('#content');
 const requests = trace => (trace?.stages || []).filter(s => s.key === 'model_request' && dataOf(s).attempt_id).map(dataOf);
@@ -38,10 +43,11 @@ async function choose(id) {
   if(state.trace?.id !== id) {
     compareSearch.query='';compareSearch.draft='';compareSearch.group='same';compareSearch.page=0;
     state.tab='overview';state.attempt=0;state.messageIndex=null;state.messagePage=0;state.inputFilter='all';state.inputQuery='';state.toolCatalogScope='request';state.toolQuery='';state.toolPage=0;state.skillCatalogScope='request';state.skillQuery='';state.skillPage=0;
+    state.left=null;
   }
   state.trace = result.trace;
   state.attempt=Math.min(state.attempt,Math.max(0,requests(state.trace).length-1));
-  state.left = null;
+  if(state.left?.id===id)state.left=result.trace;
   renderList(); render();
 }
 
@@ -78,23 +84,25 @@ function renderList() {
     details.ontoggle=()=>{state.groupOpen.set(group.key,details.open);};
     const title=el('summary');title.append(el('strong',group.label),el('small',`${group.platform} · ${group.traces.length} 条记录`));details.append(title);node.append(details);
     const page=Math.min(state.groupPages.get(group.key)||0,Math.ceil(group.traces.length/10)-1);
+    if(group.traces.length>10) {
+      const row=el('div',null,'toolbar record-pagination');details.append(row);
+      button('较新',()=>{state.groupPages.set(group.key,page-1);renderList();},row).disabled=page===0;
+      row.append(el('small',`${page+1}/${Math.ceil(group.traces.length/10)}`));
+      button('较早',()=>{state.groupPages.set(group.key,page+1);renderList();},row).disabled=(page+1)*10>=group.traces.length;
+    }
     for(const trace of group.traces.slice(page*10,page*10+10)) {
       const item=button('',()=>choose(trace.id),details);
       item.className='trace'+(state.trace?.id===trace.id?' active':'');
       item.append(el('strong',trace.summary||'无文本消息'),el('small',`${trace.started_at} · ${trace.sender_name||trace.sender_id}`));
     }
-    if(group.traces.length>10) {
-      const row=el('div',null,'toolbar');details.append(row);
-      button('较新',()=>{state.groupPages.set(group.key,page-1);renderList();},row).disabled=page===0;
-      row.append(el('small',`${page+1}/${Math.ceil(group.traces.length/10)}`));
-      button('较早',()=>{state.groupPages.set(group.key,page+1);renderList();},row).disabled=(page+1)*10>=group.traces.length;
-    }
   }
   if(!groups.size)node.append(el('p','没有符合条件的记录。发送消息后刷新。','muted'));
 }
 
-async function openView(key,attempt) {
-  if(Number.isInteger(attempt)) {
+async function openView(key,attempt,target) {
+  pendingTarget=target||null;
+  if(Number.isInteger(attempt) && attempt!==state.attempt) {
+    resetReading=true;
     state.attempt=attempt;state.messageIndex=null;state.messagePage=0;state.inputFilter='all';state.inputQuery='';
     state.toolCatalogScope='request';state.toolPage=0;state.toolQuery='';
     state.skillCatalogScope='request';state.skillPage=0;state.skillQuery='';
@@ -124,7 +132,6 @@ async function changeTab(key) {
 function requestPicker(parent,inline=false) {
   const list = requests(state.trace);
   if (!list.length) {
-    if(!inline)hint('没有逐轮模型请求记录。旧记录、第三方 Agent 或未启用的采集适配器可能没有此数据。',parent);
     return;
   }
   const row = inline?parent:el('div',null,'toolbar');
@@ -133,6 +140,19 @@ function requestPicker(parent,inline=false) {
 }
 
 function render() {
+  // Save by record, tab and request; stable data keys survive appended stages.
+  if(renderedView) {
+    const nodes=new Map([...content.querySelectorAll('[data-reading-key]')].map(node=>[node.dataset.readingKey,{open:node.tagName==='DETAILS'?node.open:undefined,top:node.scrollTop,left:node.scrollLeft}]));
+    readingViews.set(renderedView.key,{nodes,top:content.scrollTop,page:window.scrollY,messageIndex:renderedView.messageIndex});
+  }
+  if(readingTrace!==state.trace?.id) { readingViews.clear();readingTrace=state.trace?.id; }
+  const readingKey=JSON.stringify([state.trace?.id,state.tab,['input','tools','skills','compare'].includes(state.tab)?current()?.attempt_id:null,
+    state.tab==='tools'?[state.toolCatalogScope,state.toolPage,state.toolQuery,state.toolStatusFilter]:
+    state.tab==='skills'?[state.skillCatalogScope,state.skillPage,state.skillQuery,state.skillStatusFilter]:null]);
+  if(resetReading) { readingViews.clear();resetReading=false; }
+  const saved=readingViews.get(readingKey);
+  if(readingViews.size>40)readingViews.delete(readingViews.keys().next().value);
+  renderedView=null;
   content.replaceChildren();content.className=state.tab;
   const nav = document.querySelector('#tabs'); nav.replaceChildren();
   for (const [key,title] of tabs) {
@@ -151,14 +171,15 @@ function render() {
     journey.append(el('small','本记录流程','muted'));
     for(const [index,block] of buildJourney(state.trace).entries()) {
       if(index)journey.append(el('span','→','muted'));
-      const item=button(block.title,()=>openView(block.kind==='request'?'input':'overview',block.attempt),journey);
+      const target=`flow-${state.trace.stages.indexOf(block.stages[0])}`;
+      const item=button(block.title,()=>openView(block.kind==='request'?'input':'overview',block.attempt,block.kind==='request'?null:target),journey);
       if(block.kind==='request'&&block.attempt===state.attempt)item.className='active';
     }
-    if(current())selection.append(el('small',`当前选中请求 ${state.attempt+1} / ${requests(state.trace).length} · 输入 / 工具 / 对比共用；插件改动与用量看整条记录。`,'muted'));
+    if(current())selection.append(el('small',`请求 ${state.attempt+1} / ${requests(state.trace).length} · 模型输入、工具目录、技能目录和请求对比共用。`,'muted'));
     if (state.trace.truncated) hint('本记录触及采集上限，部分内容未保存。差异和用量可能不完整。',selection);
   } else selection.append(el('h2','等待第一条调试记录'));
   if (!state.trace && !['tools','skills','settings'].includes(state.tab)) {
-    content.append(el('div','发送一条消息，然后在左侧选择记录。工具、Skills 和复读设置可直接查看。','empty')); return;
+    content.append(el('div','发送一条消息，然后选择记录。工具、技能和复读设置可直接查看。','empty')); return;
   }
   if (state.tab === 'overview') overview();
   if (state.tab === 'input') input();
@@ -168,6 +189,32 @@ function render() {
   if (state.tab === 'compare') compare();
   if (state.tab === 'usage') usage();
   if (state.tab === 'settings') settings();
+  const counts=new Map();
+  for(const node of content.querySelectorAll('details,pre,.message-directory,.message-reader')) {
+    const base=JSON.stringify([node.closest('[data-read-key]')?.dataset.readKey||'',node.tagName,node.dataset.readKey||node.querySelector(':scope > summary')?.textContent||node.className]);
+    const count=counts.get(base)||0;counts.set(base,count+1);
+    node.dataset.readingKey=base+count;
+    const previous=saved?.nodes.get(node.dataset.readingKey);
+    if(node.tagName==='DETAILS'&&previous)node.open=previous.open;
+  }
+  const view={key:readingKey,messageIndex:state.messageIndex};renderedView=view;
+  const targetId=pendingTarget;pendingTarget=null;
+  requestAnimationFrame(()=>{
+    if(renderedView!==view)return;
+    for(const node of content.querySelectorAll('[data-reading-key]')) {
+      const previous=saved?.nodes.get(node.dataset.readingKey);
+      if(!previous || (node.classList.contains('message-directory')&&saved.messageIndex!==state.messageIndex))continue;
+      node.scrollTop=previous.top;node.scrollLeft=previous.left;
+    }
+    content.scrollTop=saved?.top||0;
+    window.scrollTo({top:saved?saved.page:Math.min(window.scrollY,content.getBoundingClientRect().top+window.scrollY),behavior:'instant'});
+    const target=targetId?document.getElementById(targetId):null;
+    if(target) {
+      if(target.tagName==='DETAILS')target.open=true;
+      target.tabIndex=-1;target.focus({preventScroll:true});
+      target.scrollIntoView({block:'start',behavior:'instant'});
+    }
+  });
 }
 
 function overview() {
@@ -180,7 +227,8 @@ function input() {
 }
 
 function plugins() {
-  hint('“执行边界”表示在指定插件处理函数运行前后观察到变化；嵌套调用和共享状态并发修改可能也在这个区间。它不是逐行代码追踪。补充报告则由插件自行声明来源。',content);
+  content.append(el('h2','插件改动 · 整条记录'));
+  raw('如何判断改动来源','这里对比插件运行前后的内容。变化发生在该插件执行期间，但嵌套调用或并发修改也可能参与；不能据此确定是哪一行代码造成的。补充报告由插件自行声明来源。',content);
   const row = el('div',null,'toolbar'); content.append(row);
   select('显示',[['changed','有改动或异常'],['all','所有已观测执行']],state.changesOnly?'changed':'all',v=>{state.changesOnly=v==='changed';render();},row);
   const stages = state.trace.stages.filter(s=>s.key==='extension'||(s.key==='plugin_change'&&(!state.changesOnly||dataOf(s).changed||dataOf(s).error)));
@@ -188,7 +236,8 @@ function plugins() {
   for(const stage of stages) {
     const data=dataOf(stage);
     const box=card(data.source || data.report?.source || '来源未知',content);
-    box.append(el('span',stage.key==='extension'?'插件自行报告':'执行边界观测','badge'));
+    box.id=`plugin-${state.trace.stages.indexOf(stage)}`;box.dataset.readKey=box.id;
+    box.append(el('span',stage.key==='extension'?'插件自行报告':'运行前后对比','badge'));
     box.append(el('p',`${data.handler || ''} ${data.hook || ''}`));
     if(data.duration_ms!==undefined) box.append(el('small',`${data.duration_ms} ms`,'muted'));
     if(data.error) box.append(el('p',data.error,'bad'));
@@ -231,21 +280,22 @@ function tools() {
       else executions.push({name:data.tool?.name||'未知工具',scope:data.agent_scope||'main',start:null,end:data});
     }
   }
-  content.append(el('h2',`工具执行记录 · ${executions.length} 次`));
-  if(executions.length) hint('一次调用合并显示开始与返回。同一主/子代理范围内的同名工具按观测顺序配对；“等待返回”也可能表示记录被截断或执行路径没有结束事件。',content);
+  content.append(el('h2',`工具执行记录 · 整条记录 · ${executions.length} 次`));
+  if(executions.length) raw('工具记录说明','同一主/子代理范围内的同名工具按采集顺序配对，并发时不能保证一一对应。“未采集到返回”可能是仍在执行、记录被截断，或该路径没有结束事件。',content);
   else content.append(el('div',state.trace?'这条记录没有观测到实际工具执行。':'选择一条记录后查看实际工具执行。','empty'));
-  for(const execution of executions) {
+  for(const [index,execution] of executions.entries()) {
     const box=card(`${execution.scope==='nested'?'子代理':'主代理'} · ${execution.name}`,content);
     box.className+=' tool-execution';
-    const status=execution.end?.error?'执行失败':execution.start&&execution.end?'执行完成':execution.start?'等待返回':'缺少开始记录';
+    box.dataset.readKey=`tool-execution-${index}`;
+    const status=execution.end?.error?'执行失败':execution.start&&execution.end?'已采集到返回':execution.start?'未采集到返回':'缺少开始记录';
     box.append(el('span',status,'badge'));
     const args=execution.start?.arguments??execution.end?.arguments;
     if(args!==undefined)raw('调用参数',args,box);
     if(execution.end?.error)box.append(el('p',execution.end.error,'bad'));
     if(execution.end&&execution.end.result!==undefined)raw('工具返回',execution.end.result,box);
-    raw('采集证据',{start:execution.start,end:execution.end},box);
+    raw('原始采集数据',{start:execution.start,end:execution.end},box);
   }
-  content.append(el('h2','工具目录'));
+  content.append(el('h2',hasRequest&&state.toolCatalogScope==='request'?`工具目录 · 请求 ${state.attempt+1}`:'工具目录 · 当前注册'));
   content.append(el('p',hasRequest&&state.toolCatalogScope==='request'?'当前请求提供给模型的工具；实际执行见上方记录。':'当前实时注册的工具目录，历史请求的工具以请求快照为准。','muted'));
   const catalogControls=el('div',null,'toolbar');content.append(catalogControls);
   requestPicker(catalogControls,true);
@@ -255,10 +305,7 @@ function tools() {
   },catalogControls);
   else state.toolCatalogScope='live';
   select('启用状态',[['all','全部'],['enabled','已启用'],['disabled','未启用']],state.toolStatusFilter,v=>{state.toolStatusFilter=v;state.toolPage=0;render();},catalogControls);
-  const toolSearch=el('input');toolSearch.type='search';toolSearch.placeholder='搜索工具名、说明或来源';toolSearch.value=state.toolQuery;
-  toolSearch.oninput=()=>{state.toolQuery=toolSearch.value;};
-  toolSearch.onkeydown=event=>{if(event.key==='Enter'){state.toolPage=0;render();}};catalogControls.append(toolSearch);
-  button('搜索',()=>{state.toolPage=0;render();},catalogControls);
+  searchBox('搜索工具名、说明或来源',state.toolQuery,value=>{state.toolQuery=value;state.toolPage=0;render();},catalogControls);
   const source=state.toolCatalogScope==='request'&&hasRequest?offered:(state.inventory?.tools||[]);
   const query=state.toolQuery.trim().toLowerCase();
   const filtered=source.filter(tool=>
@@ -269,7 +316,7 @@ function tools() {
   content.append(el('p',`${state.toolCatalogScope==='request'&&hasRequest?`请求 ${state.attempt+1} 提供给模型的工具`:'当前实时注册'} ${source.length} 个 · 当前显示 ${filtered.length} 个匹配项`,'muted'));
   if(!filtered.length) content.append(el('div',source.length?'没有符合搜索条件的工具。':state.toolCatalogScope==='request'?'这次请求没有提供工具。可切换到“实时注册”查看全部目录。':state.inventory?'没有可显示的工具。':'正在加载工具目录…','empty'));
   for(const tool of filtered.slice(state.toolPage*20,state.toolPage*20+20)) {
-    const box=card(tool.name,content);
+    const box=card(tool.name,content);box.dataset.readKey=`tool-${tool.name}`;
     box.append(el('span',state.toolCatalogScope==='request'&&hasRequest?'本次提供':'当前注册','badge'));
     if(names.has(tool.name)) box.append(el('span','本次对话已调用','badge'));
     if(tool.active===false) box.append(el('span','未启用','badge'));
@@ -290,17 +337,14 @@ function skills() {
   const offered=requestSkills(req?.messages || []);
   const list=state.inventory?.skills || [];
   const enabled=list.filter(s=>s.active===true).length;
-  content.append(el('h2','Skills 目录'));
+  content.append(el('h2',req&&state.skillCatalogScope==='request'?`技能目录 · 请求 ${state.attempt+1}`:'技能目录 · 本地文件'));
   content.append(el('p',req&&state.skillCatalogScope==='request'?'选中请求的 system / developer 指令中携带的技能目录。携带目录不代表模型读取或执行了技能。':'当前本地技能文件、开关和所属插件状态。请求实际携带的技能以请求快照为准。','muted'));
   const controls=el('div',null,'toolbar');content.append(controls);
   requestPicker(controls,true);
-  if(req) select('查看',[['request',`本次携带 · ${offered.length}`],['local',`本地文件 · ${list.length}`]],state.skillCatalogScope,v=>{state.skillCatalogScope=v;state.skillPage=0;render();},controls);
+  if(req) select('查看',[['request',`本次请求包含 · ${offered.length}`],['local',`本地文件 · ${list.length}`]],state.skillCatalogScope,v=>{state.skillCatalogScope=v;state.skillPage=0;render();},controls);
   else state.skillCatalogScope='local';
   select('启用状态',[['all','全部'],['enabled','已启用'],['disabled','未启用']],state.skillStatusFilter,v=>{state.skillStatusFilter=v;state.skillPage=0;render();},controls);
-  const skillSearch=el('input');skillSearch.type='search';skillSearch.placeholder='搜索 Skill 名、说明或来源';skillSearch.value=state.skillQuery;
-  skillSearch.oninput=()=>{state.skillQuery=skillSearch.value;};
-  skillSearch.onkeydown=event=>{if(event.key==='Enter'){state.skillPage=0;render();}};controls.append(skillSearch);
-  button('搜索',()=>{state.skillPage=0;render();},controls);
+  searchBox('搜索技能名、说明或来源',state.skillQuery,value=>{state.skillQuery=value;state.skillPage=0;render();},controls);
   if(state.skillCatalogScope==='local') button('刷新当前目录',async()=>{state.inventory=await api('inventory');render();},controls);
   const source=state.skillCatalogScope==='request'&&req?offered:list;
   const query=state.skillQuery.trim().toLowerCase();
@@ -312,11 +356,11 @@ function skills() {
   });
   const pages=Math.max(1,Math.ceil(filtered.length/20));state.skillPage=Math.min(state.skillPage,pages-1);
   content.append(el('p',state.skillCatalogScope==='request'&&req?`本次携带 ${offered.length} 项 · 当前显示 ${filtered.length} 项`:`本地文件 ${list.length} 项 · 技能开关开启 ${enabled} 项 · 当前显示 ${filtered.length} 项`,'muted'));
-  if(!filtered.length) content.append(el('div',source.length?'没有符合搜索条件的 Skill。':state.skillCatalogScope==='request'?'这份请求中没有识别到 Skills。全部停用时这是正常的。':state.inventory?'当前没有可读取的 Skills。':'正在加载 Skills…','empty'));
+  if(!filtered.length) content.append(el('div',source.length?'没有符合筛选条件的技能。':state.skillCatalogScope==='request'?'这次请求没有识别到技能目录。':state.inventory?'当前没有可读取的技能。':'正在加载技能目录…','empty'));
   for(const skill of filtered.slice(state.skillPage*20,state.skillPage*20+20)) {
-    const box=card(skill.name,content);
+    const box=card(skill.name,content);box.dataset.readKey=`skill-${skill.path||skill.name}`;
     if(state.skillCatalogScope==='request'&&req) {
-      box.append(el('span',`本次携带 · 消息 #${skill.messageIndex+1}`,'badge'));
+      box.append(el('span',`本次请求包含 · 消息 #${skill.messageIndex+1}`,'badge'));
       box.append(el('p',skill.description),el('small',skill.path,'muted'));
     } else {
       box.append(el('span',skill.active===true?'技能开关：开':skill.active===false?'技能开关：关':'技能开关：未知','badge'));
@@ -336,7 +380,8 @@ function skills() {
 
 function compare() {
   requestPicker(content);
-  hint('默认比较同一会话的上一条记录，也可以手动选择。基础部分包含 system / developer、工具和额外内容；注入用户消息里的指令需要在“全部内容”中查看。',content);
+  content.append(el('p','默认比较同一会话的上一条记录，也可手动选择。','muted'));
+  raw('比较范围说明','“提示词与工具”包含 system / developer、工具和额外内容。注入 user 消息里的指令，需要选择“全部内容”查看。',content);
   const picker=el('details',null,'card');
   picker.open=compareSearch.open!==false;
   const pickerTitle=el('summary','查找比较对象');picker.append(pickerTitle);content.append(picker);
@@ -344,11 +389,7 @@ function compare() {
   const filters=el('div',null,'toolbar compare-filters');picker.append(filters);
   const groups=new Map(state.traces.map(trace=>{const group=conversationGroup(trace);return [group.key,`${group.label} · ${group.platform}`];}));
   select('会话',[['same','当前会话'],['all','全部会话'],...groups],compareSearch.group,value=>{compareSearch.group=value;compareSearch.page=0;render();},filters);
-  const search=el('input');search.type='search';search.placeholder='搜索消息摘要、发送者或时间';search.value=compareSearch.draft;
-  search.setAttribute('aria-label','搜索比较记录');filters.append(search);
-  search.oninput=()=>{compareSearch.draft=search.value;};
-  const searchButton=button('搜索',()=>{compareSearch.query=compareSearch.draft;compareSearch.page=0;showMatches();},filters);
-  search.onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();searchButton.click();}};
+  searchBox('搜索消息摘要、发送者或时间',compareSearch.query,value=>{compareSearch.query=value;compareSearch.page=0;render();},filters);
   button('当前这条记录',()=>{++compareSelectionVersion;state.left=state.trace;state.leftAttempt=0;render();},filters);
   const matches=el('div',null,'compare-matches');picker.append(matches);
   // Update only the result list so typing keeps keyboard focus.
@@ -362,6 +403,12 @@ function compare() {
     });
     const pages=Math.max(1,Math.ceil(candidates.length/8));compareSearch.page=Math.min(compareSearch.page,pages-1);
     matches.append(el('small',`匹配 ${candidates.length} 条已加载记录 · 第 ${compareSearch.page+1} / ${pages} 页`,'muted'));
+    if(pages>1) {
+      const pager=el('div',null,'toolbar record-pagination');matches.append(pager);
+      button('上一页',()=>{compareSearch.page--;showMatches();},pager).disabled=compareSearch.page===0;
+      button('下一页',()=>{compareSearch.page++;showMatches();},pager).disabled=compareSearch.page+1>=pages;
+    }
+    const records=el('div',null,pages>1?'compare-records paged':'compare-records');matches.append(records);
     for(const trace of candidates.slice(compareSearch.page*8,compareSearch.page*8+8)) {
       const item=button('',async()=>{
         const version=++compareSelectionVersion;
@@ -369,17 +416,12 @@ function compare() {
         if(version!==compareSelectionVersion)return;
         state.left=left;state.leftAttempt=0;
         if(state.tab==='compare')render();
-      },matches);
+      },records);
       item.className='compare-record'+(state.left?.id===trace.id?' active':'');
       item.setAttribute('aria-pressed',String(state.left?.id===trace.id));
       item.append(el('strong',trace.summary||'无文本消息'),el('small',`${trace.started_at||''} · ${conversationGroup(trace).label} · ${trace.sender_name||trace.sender_id||''}${trace.id===state.trace.id?' · 当前记录':''}`));
     }
-    if(!candidates.length)matches.append(el('div','没有匹配的记录。可清空搜索或切换到全部会话。','empty'));
-    if(pages>1) {
-      const pager=el('div',null,'toolbar');matches.append(pager);
-      button('上一页',()=>{compareSearch.page--;showMatches();},pager).disabled=compareSearch.page===0;
-      button('下一页',()=>{compareSearch.page++;showMatches();},pager).disabled=compareSearch.page+1>=pages;
-    }
+    if(!candidates.length)records.append(el('div','没有匹配的记录。可清空搜索或切换到全部会话。','empty'));
   };
   showMatches();
   content.append(el('p',state.left?`已选比较对象：${state.left.started_at||''} · ${conversationGroup(state.left).label} · ${state.left.summary||'无文本消息'}`:'请选择上方的一条记录。','compare-selected'));
@@ -438,12 +480,13 @@ function usage() {
     content.append(el('h2','Token 与耗时'),el('div','这条记录没有模型请求快照，无法汇总 Token 用量与耗时。','empty'));
     return;
   }
-  hint(`${reported} / ${list.length} 次请求有服务商用量记录。缓存命中包含在输入中；缺失、失败、截断或内部重试可能使统计不完整。内容粗估按序列化字符数 ÷ 4 累加，只包含输入消息和工具定义，不能用于确认账单。`,content);
+  content.append(el('p',`整条记录 · ${reported} / ${list.length} 次请求返回用量。缓存命中已包含在输入中。`,'muted'));
+  raw('用量与粗估说明','API 返回用量只累计已提供的数据；缺失、失败、截断或内部重试可能使统计不完整。内容粗估按序列化字符数 ÷ 4 累加，只包含输入消息和工具定义，不能用于确认账单。',content);
   for(const summary of models.values()) {
     const box=card(summary.name,content);box.className+=' usage-model';
     box.querySelector('h3').append(el('small',`${summary.requests} 次请求 · 回报 ${summary.reported} 次`,'muted'));
     const reportedValues=[['累计输入','input'],['累计输出','output'],['缓存命中','cached']].map(([label,field])=>`${label} ${summary.counts[field]?summary[field].toLocaleString():'未提供'}`);
-    const reportedLine=el('p',null,'usage-line');reportedLine.append(el('strong','服务商回报总计：'),el('span',reportedValues.join(' · ')));box.append(reportedLine);
+    const reportedLine=el('p',null,'usage-line');reportedLine.append(el('strong','API 返回用量（累计）：'),el('span',reportedValues.join(' · ')));box.append(reportedLine);
     const estimatedValues=Object.entries(summary.estimate).map(([name,value])=>`${name} ≈ ${value.toLocaleString()}`);
     const estimatedLine=el('p',null,'usage-line');estimatedLine.append(el('strong','内容分布粗估：'),el('span',estimatedValues.join(' · ')));box.append(estimatedLine);
   }
@@ -452,6 +495,7 @@ function usage() {
     const response=responses.find(r=>r.attempt_id===req.attempt_id);
     const u=response?.response?.usage;
     const box=card(`请求 ${list.indexOf(req)+1} · ${req.provider||'未知提供商'}`,content);
+    box.dataset.readKey=`usage-${req.attempt_id}`;
     if(u) {
       const input=u.input ?? ((u.input_other||0)+(u.input_cached||0));
       box.append(el('p',`服务商回报：输入 ${input} · 输出 ${u.output??'未提供'} · 缓存输入 ${u.input_cached??'未提供'}`));
